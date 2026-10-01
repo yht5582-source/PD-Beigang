@@ -24,23 +24,42 @@ const PD = (() => {
     const dip=d.petConcentration==='4.25'&&na0!==null&&na1!==null?na0-na1:null;
     return {ratio,transport:chosen,label:types[chosen]||'未判讀',uf,threshold,standard,lowUf:standard&&uf!==null&&threshold!==null&&uf<threshold,glucose:g0>0&&g4!==null?g4/g0:null,dip,lowDip:dip!==null&&dip<=5,outside:ratio!==null&&(ratio<0.34||ratio>1.03)};
   }
-  function assess(d){
-    let missing=[],blocks=[],warnings=[],reasons=[],adjustments=[];
+  function requiredFields(stage){
     const required={age:'年齡',height:'身高',weight:'體重',urine:'每日尿量',volume:'容量狀態',symptom:'尿毒症症狀',access:'導管／起始狀態',apdReady:'APD 可行性',capdReady:'CAPD 可行性',potassium:'K',bicarb:'HCO₃⁻',fill:'醫師確認可耐受灌注量',calcium:'葡萄糖液鈣配方'};
-    if(d.stage!=='initial')Object.assign(required,{currentMode:'目前方式',uf:'每日 PD 淨超濾',currentFill:'目前灌注量',currentCycles:'目前交換／循環次數',adherence:'執行狀態'});
-    if(d.stage==='pet')Object.assign(required,{petDate:'PET 日期',petConcentration:'PET 濃度',petIn:'PET 灌入量',petOut:'PET 引流量',dp:'4 小時 D/P Cr',crCorrection:'Cr 校正確認'});
-    for(const [key,label] of Object.entries(required))if(d[key]===''||d[key]==null)missing.push(label);
+    if(stage!=='initial')Object.assign(required,{currentMode:'目前方式',uf:'每日 PD 淨超濾',currentFill:'目前灌注量',currentCycles:'目前交換／循環次數',adherence:'執行狀態'});
+    if(stage==='pet')Object.assign(required,{petDate:'PET 日期',petConcentration:'PET 濃度',petIn:'PET 灌入量',petOut:'PET 引流量',dp:'4 小時 D/P Cr',crCorrection:'Cr 校正確認'});
+    return required;
+  }
+  // Watson total body water；24 小時尿液／透析液尿素清除。尿素以 BUN（mg/dL）表示，分子分母單位一致。
+  function clearance(d){
+    const age=num(d.age),h=num(d.height),w=num(d.weight),bun=num(d.bun),scr=num(d.serumCr),uvol=num(d.urine),uun=num(d.uun),ucr=num(d.ucr),dvol=num(d.dialVol),dun=num(d.dun);
+    const errors=[];let V=null;
+    if(h===null||w===null||!['male','female'].includes(d.sex)||(d.sex==='male'&&age===null))errors.push('計算 Watson V 需性別、身高、體重（男性另需年齡）。');
+    else V=d.sex==='male'?2.447-0.09516*age+0.1074*h+0.3362*w:-2.097+0.1069*h+0.2466*w;
+    const pos=x=>x!==null&&Number.isFinite(x)&&x>0;
+    const kru=pos(bun)&&uun!==null&&uvol!==null?uun*uvol/(bun*1440):null;
+    const ccr=pos(scr)&&ucr!==null&&uvol!==null?ucr*uvol/(scr*1440):null;
+    const renalKtv=V&&pos(bun)&&uun!==null&&uvol!==null?uun/bun*uvol/1000*7/V:null;
+    const pdKtv=V&&pos(bun)&&dun!==null&&dvol!==null?dun/bun*dvol/1000*7/V:null;
+    if(!pos(bun))errors.push('需血中 BUN（同一時段）。');
+    return {V,kru,ccr,renalKtv,pdKtv,total:renalKtv!==null&&pdKtv!==null?renalKtv+pdKtv:null,errors};
+  }
+  function assess(d){
+    let missing=[],missingKeys=[],blocks=[],warnings=[],reasons=[],adjustments=[],factors=[];
+    const need=(label,key)=>{missing.push(label);if(key)missingKeys.push(key);};
+    const required=requiredFields(d.stage);
+    for(const [key,label] of Object.entries(required))if((d[key]===''||d[key]==null)&&!(key==='symptom'&&Array.isArray(d.symptoms)))need(label,key==='symptom'?'symptoms':key);
     const kidney=renal(d),sx=symptoms(d);
     if(Array.isArray(d.symptoms)){
-      if(!d.symptoms.length)missing.push('尿毒症症狀（可複選，無症狀請明確勾選）');
+      if(!d.symptoms.length)need('尿毒症症狀（可複選，無症狀請明確勾選）','symptoms');
       if(d.symptoms.includes('none')&&sx.present)blocks.push('無明顯症狀不能與其他症狀同時勾選。');
       if(d.symptoms.some(x=>!Object.hasOwn(symptomLabels,x)))blocks.push('症狀選項無效，請重新選擇。');
-      if(sx.present&&!['mild','moderate','severe'].includes(d.symptomSeverity))missing.push('整體症狀嚴重度');
-      if(sx.present&&!['likely','uncertain','other'].includes(d.symptomAttribution))missing.push('症狀臨床歸因評估');
+      if(sx.present&&!['mild','moderate','severe'].includes(d.symptomSeverity))need('整體症狀嚴重度','symptomSeverity');
+      if(sx.present&&!['likely','uncertain','other'].includes(d.symptomAttribution))need('症狀臨床歸因評估','symptomAttribution');
     }
     if(sx.urgent)blocks.push('疑似尿毒性腦病或心包膜炎：需即時評估與適當透析支持，暫停常規 CAPD／APD 草案。');
-    if(d.stage==='initial'&&!kidney.hasBaseline)missing.push('初始腎功能資料：血清 Cr／eGFR／實測 CCr／Kru 至少一項');
-    if(missing.length)return {missing,blocks,warnings,reasons,adjustments};
+    if(d.stage==='initial'&&!kidney.hasBaseline)need('初始腎功能資料：血清 Cr／eGFR／實測 CCr／Kru 至少一項','serumCr');
+    if(missing.length)return {missing,missingKeys,blocks,warnings,reasons,adjustments};
     const age=num(d.age),fill=num(d.fill),k=num(d.potassium),hco=num(d.bicarb);
     if(age<18||age>120)blocks.push('本版僅適用成人慢性 PD，年齡須介於 18–120 歲。');
     if(fill<500||fill>2500)blocks.push('灌注量超出本版可用範圍 500–2500 mL，需人工處方。');
@@ -53,30 +72,36 @@ const PD = (() => {
     const p=d.stage==='pet'?pet(d):null;
     if(p&&(p.ratio<=0||p.ratio>1.2))blocks.push('D/P Cr 超出有效輸入範圍。');
     if(d.dose==='incremental'){
-      if(!d.incrementalSafe||!kidney.incrementalEvidence)missing.push('增量式 PD：完整定時尿實測 Kru 或腎臟 Kt/V、腎功能穩定與醫師評估確認');
+      if(!d.incrementalSafe||!kidney.incrementalEvidence)need('增量式 PD：完整定時尿實測 Kru 或腎臟 Kt/V、腎功能穩定與醫師評估確認',!kidney.incrementalEvidence?'kru':'incrementalSafe');
       if(d.volume!=='euvolemic'||symptoms(d).related||k>5.5||hco<22)blocks.push('存在容量／清除或生化控制問題，暫不產生增量式低劑量模板。');
     }
-    if(blocks.length||missing.length)return {missing,blocks,warnings,reasons,adjustments,pet:p};
+    if(blocks.length||missing.length)return {missing,missingKeys,blocks,warnings,reasons,adjustments,pet:p};
     let apd=0,capd=0;
+    const factor=(label,a,c)=>{apd+=a;capd+=c;factors.push({label,apd:a,capd:c});};
     if(p){
-      if(['high','highAvg'].includes(p.transport)){apd+=3;reasons.push('PET 運輸較快：APD 較短留置可降低葡萄糖長留置後的水分再吸收風險。');}
-      else {capd+=3;reasons.push('PET 運輸較慢：優先保留較長留置以利溶質平衡；CAPD 較容易提供長留置。');}
+      if(['high','highAvg'].includes(p.transport)){factor('PET '+p.label,3,0);reasons.push('PET 運輸較快：APD 較短留置可降低葡萄糖長留置後的水分再吸收風險。');}
+      else {factor('PET '+p.label,0,3);reasons.push('PET 運輸較慢：優先保留較長留置以利溶質平衡；CAPD 較容易提供長留置。');}
       if(p.lowUf)warnings.push('標準 PET 淨超濾低於濃度對應閾值。先檢查機械原因、漏液、容量與膜功能；不等同必須轉 HD。');
       if(!p.standard)warnings.push('PET 灌入量非 2 L，本版不套用標準淨超濾閾值。');
       if(p.lowDip)warnings.push('4.25% PET 的 1 小時 sodium dip ≤5 mmol/L：需進一步評估低葡萄糖滲透導水能力，不能單憑此結果確診。');
       if(p.outside)warnings.push('D/P Cr 超出原始參考族群範圍，請核對檢驗與試驗流程。');
     }else reasons.push('尚無有效 PET：模式先依治療負擔、可行性、病人偏好與實測反應決定，不假設運輸型態。');
-    if(d.preference==='APD'){apd+=4;reasons.push('病人偏好夜間 APD，以保留白天活動時間。');}
-    if(d.preference==='CAPD'){capd+=4;reasons.push('病人偏好手動交換，將其納入方式選擇。');}
-    if(d.currentMode==='APD')apd+=1;
-    if(d.currentMode==='CAPD')capd+=1;
+    if(d.preference==='APD'){factor('病人偏好 APD',4,0);reasons.push('病人偏好夜間 APD，以保留白天活動時間。');}
+    if(d.preference==='CAPD'){factor('病人偏好 CAPD',0,4);reasons.push('病人偏好手動交換，將其納入方式選擇。');}
+    if(d.lifeWork){factor('日間工作／就學／照顧需求',2,0);reasons.push('白天需工作、就學或照顧家人：APD 可減少日間交換。');}
+    if(d.lifeAssisted){factor('需他人協助執行',2,0);reasons.push('需家人／照護者協助：APD 每日集中一次上下機，較易安排輔助 PD。');}
+    if(d.lifeIap){factor('腹壓考量（疝氣史、多囊腎或腹壁手術）',1,0);reasons.push('有腹壓相關考量：APD 臥位留置腹壓較低，仍需個別評估。');}
+    if(d.lifeNight){factor('夜間睡眠易受干擾／不宜使用機器',0,2);reasons.push('夜間睡眠或居家環境不適合機器治療，納入 CAPD 考量。');}
+    if(d.currentMode==='APD')factor('延續目前 APD',1,0);
+    if(d.currentMode==='CAPD')factor('延續目前 CAPD',0,1);
     const hours=num(d.sleep),fast=p&&['high','highAvg'].includes(p.transport),slow=p&&['low','lowAvg'].includes(p.transport);
+    if(hours!==null&&hours<8){factor('夜間可用時間 <8 小時',0,2);warnings.push('夜間可用時間少於 8 小時：APD 留置與清除需個別設計，勿以增加循環次數取代評估。');}
+    const scores={apd,capd,apdOk:d.apdReady!=='no',capdOk:d.capdReady!=='no'};
     if(d.apdReady==='no')apd=-100;
     if(d.capdReady==='no')capd=-100;
-    if(hours!==null&&hours<8){capd+=2;warnings.push('夜間可用時間少於 8 小時：APD 留置與清除需個別設計，勿以增加循環次數取代評估。');}
     let mode=apd>capd?'APD':'CAPD';
     if(d.apdReady==='no')mode='CAPD';if(d.capdReady==='no')mode='APD';
-    if(mode==='APD'&&(hours===null||hours<4||hours>14))missing.push('APD 可用夜間時間（4–14 小時）');
+    if(mode==='APD'&&(hours===null||hours<4||hours>14))need('APD 可用夜間時間（4–14 小時）','sleep');
     if(sx.present){
       reasons.push('症狀：'+sx.labels.join('、')+'；嚴重度 '+({mild:'輕度',moderate:'中度',severe:'重度'}[d.symptomSeverity]||'未細分')+'。症狀不單獨決定 CAPD／APD。');
       if(d.stage==='initial')adjustments.push(sx.related?'初始有可能與尿毒症相關的症狀：整合起始時機、腎功能、容量與生化資料評估清除需求；起始後早期複評症狀與攝食，不先假定 Kt/V 或自動增加循環。':'症狀已評估主要為其他原因：處理該病因，並追蹤透析後症狀變化。');
@@ -99,8 +124,8 @@ const PD = (() => {
     const alternate=mode==='APD'?'CAPD':'APD', altReady=d[alternate==='APD'?'apdReady':'capdReady']==='yes';
     reasons.push(mode==='APD'?'APD 可行，依 PET 與偏好排列為優先方式；具體劑量需以實測療效調整。':'CAPD 可行，依較長留置、偏好或既有模式排列為優先方式。');
     if(mode==='APD'&&slow)warnings.push('較慢運輸者採 APD：避免過多短循環，保留足夠夜間留置並評估日間交換。');
-    if(mode==='CAPD'&&fast)warnings.push('较快運輸者採 CAPD：避免葡萄糖液過長留置，考慮縮短交換或以 icodextrin 作長留置。');
-    return {missing,blocks,warnings,reasons,adjustments,pet:p,kidney,mode,alternate:altReady?alternate:null,ktv,bsa:Math.sqrt(num(d.height)*num(d.weight)/3600),fast,slow};
+    if(mode==='CAPD'&&fast)warnings.push('較快運輸者採 CAPD：避免葡萄糖液過長留置，考慮縮短交換或以 icodextrin 作長留置。');
+    return {missing,missingKeys,blocks,warnings,reasons,adjustments,factors,scores,pet:p,kidney,mode,alternate:altReady?alternate:null,ktv,bsa:Math.sqrt(num(d.height)*num(d.weight)/3600),fast,slow};
   }
   function initialRx(d,a){
     const incremental=d.dose==='incremental',fill=num(d.fill),hours=num(d.sleep)||8;
@@ -113,6 +138,73 @@ const PD = (() => {
       for(let i=0;i<n;i++)rx.rows.push({volume:fill,dwell:useIco?(i===n-1?8:16/(n-1)):incremental?6:24/n,kind:i===n-1&&useIco?'ico':'glucose',concentration,lowCa:d.calcium==='low'});
     } else if(long==='dry'){rx.lastVolume=0;rx.lastKind='dry';}
     return rx;
+  }
+  // 治療中：以現行處方為起點，一次只調整一個主要項目（容量一項、清除一項）。
+  function adjustRx(d,a,catalog){
+    const mode=d.currentMode,tol=num(d.fill),changes=[],lowCa=d.calcium==='low';
+    if(a.mode!==mode){const rx=initialRx(d,a);changes.push(`方式由 ${mode} 改為 ${a.mode}：依新方式模板重設，須重新訓練並核對設定。`);return {rx,changes,switched:true};}
+    const curFill=num(d.currentFill),n=Math.round(num(d.currentCycles)),curConc=Number(d.currentConcentration)||1.5,last=d.currentLast||'dry';
+    let fill=Math.min(curFill,tol);
+    if(curFill>tol)changes.push(`灌注量 ${curFill}→${tol} mL：不超過本次確認可耐受量。`);
+    const has=(conc,vol)=>catalog.some(x=>x.mode===mode&&x.kind==='glucose'&&x.concentration===conc&&x.lowCa===lowCa&&x.bag>=vol);
+    let conc=curConc;
+    if(!has(conc,fill)){conc=has(2.5,fill)?2.5:1.5;changes.push(`目前 ${curConc}% 在所選鈣配方／容量無院內對應品項，草案暫以 ${conc}%，請人工核對。`);}
+    const sleep=num(d.sleep),curHours=num(d.currentHours);
+    let rx;
+    if(mode==='CAPD'){
+      const count=Math.min(Math.max(n,1),6);
+      rx={mode,fill,calcium:d.calcium,rows:Array.from({length:count},()=>({volume:fill,dwell:24/count,kind:'glucose',concentration:conc,lowCa})),hours:null,cycles:null,lastKind:null};
+      if(last==='ico'&&count>1)setCapdIco(rx);
+    }else{
+      let hours=curHours??Math.min(sleep||8,8);
+      if(sleep!==null&&hours>sleep){changes.push(`APD 時數 ${hours}→${sleep} 小時：不超過病人可用夜間時間。`);hours=sleep;}
+      rx={mode,fill,calcium:d.calcium,hours,cycles:Math.min(Math.max(n,1),12),nightConcentration:conc,lastKind:last,lastVolume:last==='dry'?0:fill,lastConcentration:conc,prime:null,rows:[]};
+    }
+    const g=goals(d,a,{mode,rows:rx.rows,cycles:rx.cycles,hours:rx.hours},0);
+    const ufShort=g.confirmed&&g.actual!==null&&g.actual<g.ufGoal;
+    const ufProblem=d.volume==='overload'||ufShort;
+    const clearProblem=(g.ktvReliable&&g.measured<g.target)||symptoms(d).related||num(d.potassium)>5.5||num(d.bicarb)<22;
+    const usesIco=mode==='CAPD'?rx.rows.some(r=>r.kind==='ico'):rx.lastKind==='ico';
+    if(d.adherence==='missed'){changes.push('有漏做／中斷：先改善實際執行與完成量，本草案不自動加量。');return {rx,changes,switched:false};}
+    if(d.volume==='depleted'){
+      if(conc>1.5){setConc(rx,1.5);changes.push(`疑似容量不足：葡萄糖濃度 ${conc}%→1.5%，並重新評估目標體重。`);}
+      else changes.push('疑似容量不足：不增加超濾，先重新評估目標體重、攝取與用藥。');
+    }else if(ufProblem||(a.fast&&!usesIco&&(mode==='CAPD'||rx.lastKind==='glucose'))){
+      const why=ufShort?`淨 UF 低於目標 ${Math.round(g.ufGoal-g.actual)} mL/day`:ufProblem?'容量過多':'較快運輸且長留置為葡萄糖液';
+      const canIco=!usesIco&&(mode==='CAPD'?rx.rows.length>1:true);
+      if(canIco&&d.icoSafe){
+        if(mode==='CAPD'){setCapdIco(rx);changes.push(`${why}：夜間長留置改為 icodextrin 7.5%（每日一次）。`);}
+        else {const from=rx.lastKind==='dry'?'日間乾腹':'日間葡萄糖液';rx.lastKind='ico';rx.lastVolume=fill;changes.push(`${why}：${from}改為 icodextrin 7.5% 日間長留置。`);}
+      }else if(canIco){changes.push(`${why}：建議評估 icodextrin 長留置；尚未勾選適用性確認，草案未自動帶入。`);}
+      else if(conc<2.5&&has(2.5,fill)){
+        if(mode==='CAPD'){const r=rx.rows.find(x=>x.kind==='glucose');r.concentration=2.5;changes.push(`${why}：第 1 次交換 ${conc}%→2.5%，其餘維持；追蹤葡萄糖暴露。`);}
+        else {rx.nightConcentration=2.5;if(rx.lastKind==='glucose')rx.lastConcentration=2.5;changes.push(`${why}：夜間濃度 ${conc}%→2.5%；追蹤葡萄糖暴露。`);}
+      }else changes.push(`${why}：已使用 icodextrin／較高濃度，先核對鹽水攝取、殘餘腎功能、導管引流與膜功能，不再自動提高濃度。`);
+    }
+    if(clearProblem&&d.volume!=='depleted'){
+      const why=g.ktvReliable&&g.measured<g.target?`實測總 Kt/V ${g.measured.toFixed(2)} 低於 ${g.target}`:'症狀／生化顯示清除可能不足';
+      if(fill<tol){const old=fill;setFill(rx,tol);changes.push(`${why}：灌注量 ${old}→${tol} mL（醫師確認可耐受量）。`);}
+      else if(mode==='CAPD'&&rx.rows.length<5){const ico=rx.rows.some(r=>r.kind==='ico');rx.rows.push({volume:fill,dwell:0,kind:'glucose',concentration:conc,lowCa});if(ico)setCapdIco(rx);else rx.rows.forEach(r=>r.dwell=24/rx.rows.length);changes.push(`${why}：CAPD 交換 ${rx.rows.length-1}→${rx.rows.length} 次／日。`);}
+      else if(mode==='APD'&&rx.lastKind==='dry'){rx.lastKind='glucose';rx.lastVolume=fill;rx.lastConcentration=rx.nightConcentration;changes.push(`${why}：日間乾腹改為葡萄糖液日間留置（wet day）。`);}
+      else if(mode==='APD'&&sleep!==null&&rx.hours<sleep){const old=rx.hours;rx.hours=Math.min(sleep,old+1);changes.push(`${why}：APD 時數 ${old}→${rx.hours} 小時。`);}
+      else if(mode==='APD'&&rx.cycles<8&&!a.slow){rx.cycles+=1;changes.push(`${why}：夜間循環 ${rx.cycles-1}→${rx.cycles} 次；核對每循環留置時間。`);}
+      else changes.push(`${why}：現行可耐受劑量已達本版上限，需人工評估加日間交換、改變方式或其他治療。`);
+    }
+    if(!changes.length)changes.push('目前資料未顯示需調整：維持現行處方，持續追蹤容量、症狀與實測清除。');
+    return {rx,changes,switched:false};
+  }
+  function setConc(rx,c){if(rx.mode==='CAPD')rx.rows.forEach(r=>{if(r.kind==='glucose')r.concentration=c;});else{rx.nightConcentration=c;if(rx.lastKind==='glucose')rx.lastConcentration=c;}}
+  function setFill(rx,v){rx.fill=v;if(rx.mode==='CAPD')rx.rows.forEach(r=>r.volume=v);else if(rx.lastKind!=='dry')rx.lastVolume=v;}
+  function setCapdIco(rx){const n=rx.rows.length;rx.rows.forEach((r,i)=>{if(i===n-1){r.kind='ico';r.concentration=7.5;r.dwell=8;delete r.productCode;}else{if(r.kind==='ico'){r.kind='glucose';r.concentration=1.5;}r.dwell=16/(n-1);}});}
+  // 處方摘要：供紀錄與比較，不含醫令碼。
+  function rxSummary(rx){
+    if(!rx)return null;
+    if(rx.mode==='CAPD'){const g=rx.rows.filter(r=>r.kind==='glucose').map(r=>r.concentration);return {mode:'CAPD',fill:rx.rows[0]?.volume??null,count:rx.rows.length,hours:null,concentration:g.length?Math.max(...g):null,long:rx.rows.some(r=>r.kind==='ico')?'ico':rx.rows.some(r=>r.kind==='aa')?'aa':'glucose',text:`CAPD ${rx.rows.length} 次／日：`+rx.rows.map(r=>`${r.volume}mL ${r.kind==='ico'?'Icodextrin':r.kind==='aa'?'Nutrineal':r.concentration+'%'} ${Number(r.dwell.toFixed(1))}h`).join('、')};}
+    return {mode:'APD',fill:rx.fill,count:rx.cycles,hours:rx.hours,concentration:rx.nightConcentration,long:rx.lastKind,text:`APD ${rx.hours}h × ${rx.cycles} 循環 × ${rx.fill}mL ${rx.nightConcentration}%；日間${rx.lastKind==='dry'?'乾腹':rx.lastKind==='ico'?` Icodextrin ${rx.lastVolume}mL`:` ${rx.lastConcentration}% ${rx.lastVolume}mL`}`};
+  }
+  function currentSummary(d){
+    if(!d.currentMode)return null;const fill=num(d.currentFill),n=num(d.currentCycles),c=Number(d.currentConcentration)||null;
+    return {mode:d.currentMode,fill,count:n,hours:d.currentMode==='APD'?num(d.currentHours):null,concentration:c,long:d.currentMode==='CAPD'&&d.currentLast!=='ico'?'glucose':d.currentLast||'dry'};
   }
   function goals(d,a,rx,total){
     const intake=num(d.intake),urine=num(d.urine),loss=num(d.otherLoss),excess=num(d.excessFluid),days=num(d.correctionDays),manual=num(d.manualUfGoal);
@@ -131,7 +223,7 @@ const PD = (() => {
     const notes=['目標不是此處方的預測效果，需用實測資料確認。'];
     if(calculated!==null&&calculated<0)notes.push('水分收支估計為負值：先評估容量不足或攝取需求；0 mL 並非可自動採用的乾腹處方。');
     if(manual!==null&&calculated!==null&&Math.abs(manual-Math.max(0,calculated))>100)notes.push('醫師指定目標與收支估計不同，請於醫師補充記錄理由。');
-    if(actual!==null&&confirmed&&actual<ufGoal)notes.push('淨 UF 低於本次目標 '+Math.round(ufGoal-actual)+' mL/day：核對實際完成量、攝取與鹽分、引流／漏液；依 PET 與實测反應調整留置、用液或日間交換。');
+    if(actual!==null&&confirmed&&actual<ufGoal)notes.push('淨 UF 低於本次目標 '+Math.round(ufGoal-actual)+' mL/day：核對實際完成量、攝取與鹽分、引流／漏液；依 PET 與實測反應調整留置、用液或日間交換。');
     if(actual!==null&&confirmed&&actual>=ufGoal&&d.volume!=='euvolemic')notes.push('UF 數值達目標，但容量尚未穩定，不能判為整體達標。');
     if(ktvReliable&&measured<target)notes.push('實測總 Kt/V 低於檢核參考：先核對完整收集與執行，再評估增加可耐受總交換量、有效留置或日間交換；不按 Kt/V 比例直接放大劑量。');
     if(symptoms(d).related)notes.push('仍有可能與尿毒症相關的症狀：即使 Kt/V 達參考值仍需評估，症狀改善才是臨床追蹤目標之一。');
@@ -167,7 +259,7 @@ const PD = (() => {
       if(!Number.isFinite(rx.hours)||rx.hours<4||rx.hours>Number(d.sleep))errors.push('APD 時數須介於 4 小時與病人可用夜間時間之間。');
       if(!Number.isFinite(rx.prime)||rx.prime<0||rx.prime>2000)errors.push('請填入管路預充／額外準備量（mL），依實際機器耗材確認。');
       if(!Number.isFinite(rx.fillDrain)||rx.fillDrain<=0||rx.fillDrain>90)errors.push('請填入每循環灌入＋引流時間（分鐘）。');
-      if(!Number.isFinite(rx.initialDrain)||rx.initialDrain<0||rx.initialDrain>90||!Number.isFinite(rx.lastFillTime)||rx.lastFillTime<0||rx.lastFillTime>90)errors.push('請填入初始引流與最後灌注時間（分钟）；無最後灌注時填 0。');
+      if(!Number.isFinite(rx.initialDrain)||rx.initialDrain<0||rx.initialDrain>90||!Number.isFinite(rx.lastFillTime)||rx.lastFillTime<0||rx.lastFillTime>90)errors.push('請填入初始引流與最後灌注時間（分鐘）；無最後灌注時填 0。');
       const netMinutes=rx.hours*60-rx.cycles*rx.fillDrain-rx.initialDrain-rx.lastFillTime;
       if(netMinutes<=0)errors.push('灌入／引流與初始／最後灌注占滿治療時間，無有效留置。');
       else if(netMinutes/rx.cycles<60)warnings.push('估算每循環留置少於 60 分鐘，需核對溶質清除、鈉移除與實際機器紀錄。');
@@ -191,6 +283,6 @@ const PD = (() => {
     if(d.volume==='depleted'&&((rx.mode==='APD'&&rx.nightConcentration>1.5)||rx.rows.some(x=>x.kind==='glucose'&&x.concentration>1.5)))warnings.push('容量不足狀態仍使用較高葡萄糖濃度，需重新評估。');
     return {errors:[...new Set(errors)],warnings:[...new Set(warnings)],bags:[...bags.values()],total,glucose,aa,dwell,icoCount};
   }
-  return {num,goals,symptoms,symptomLabels,renal,pet,assess,initialRx,validateRx,chooseProduct,types};
+  return {num,goals,symptoms,symptomLabels,renal,pet,assess,initialRx,adjustRx,rxSummary,currentSummary,validateRx,chooseProduct,types,requiredFields,clearance};
 })();
 if(typeof module!=='undefined')module.exports=PD;
