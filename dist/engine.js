@@ -73,7 +73,13 @@ const PD = (() => {
     if(p&&(p.ratio<=0||p.ratio>1.2))blocks.push('D/P Cr 超出有效輸入範圍。');
     if(d.dose==='incremental'){
       if(!d.incrementalSafe||!kidney.incrementalEvidence)need('增量式 PD：完整定時尿實測 Kru 或腎臟 Kt/V、腎功能穩定與醫師評估確認',!kidney.incrementalEvidence?'kru':'incrementalSafe');
-      if(d.volume!=='euvolemic'||symptoms(d).related||k>5.5||hco<22)blocks.push('存在容量／清除或生化控制問題，暫不產生增量式低劑量模板。');
+      const why=[];
+      if(d.volume==='overload')why.push('容量過多／水腫');
+      if(d.volume==='depleted')why.push('疑似容量不足');
+      if(symptoms(d).related)why.push(d.symptomAttribution==='uncertain'?'尿毒症相關症狀歸因尚未確定':'可能與尿毒症相關的症狀');
+      if(k>5.5)why.push(`K ${k} >5.5 mmol/L`);
+      if(hco<22)why.push(`HCO₃⁻ ${hco} <22 mmol/L`);
+      if(why.length)blocks.push(`暫不產生增量式低劑量模板：${why.join('；')}。增量式需容量穩定、無尿毒症相關症狀且 K／HCO₃⁻ 控制良好；請改用一般草案模板，穩定後再評估。`);
     }
     if(blocks.length||missing.length)return {missing,missingKeys,blocks,warnings,reasons,adjustments,pet:p};
     let apd=0,capd=0;
