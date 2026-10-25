@@ -133,15 +133,20 @@ const PD = (() => {
     if(mode==='CAPD'&&fast)warnings.push('較快運輸者採 CAPD：避免葡萄糖液過長留置，考慮縮短交換或以 icodextrin 作長留置。');
     return {missing,missingKeys,blocks,warnings,reasons,adjustments,factors,scores,pet:p,kidney,mode,alternate:altReady?alternate:null,ktv,bsa:Math.sqrt(num(d.height)*num(d.weight)/3600),fast,slow};
   }
+  const ICO_MAX=2000;
+  const apdIcoWindow=hours=>24-hours>=14&&24-hours<=16;
   function initialRx(d,a){
-    const incremental=d.dose==='incremental',fill=num(d.fill),hours=num(d.sleep)||8;
+    const incremental=d.dose==='incremental',fill=num(d.fill),hours=Math.min(num(d.sleep)||8,a.slow?10:8);
     const concentration=d.volume==='overload'?2.5:1.5;
-    const long=d.longSolution==='auto'?((a.fast||d.volume==='overload')?'ico':'glucose'):d.longSolution;
-    const rx={mode:a.mode,fill,calcium:d.calcium,hours:Math.min(hours,a.slow?10:8),cycles:incremental?3:a.fast?5:a.slow?3:4,lastVolume:incremental&&long!=='ico'?0:fill,lastKind:incremental&&long!=='ico'?'dry':long,lastConcentration:concentration,nightConcentration:concentration,prime:null,rows:[]};
+    let long=d.longSolution==='auto'?((a.fast||d.volume==='overload')?'ico':'glucose'):d.longSolution;
+    // Auto never proposes an APD icodextrin day dwell outside the 14–16 h window validateRx enforces.
+    if(d.longSolution==='auto'&&long==='ico'&&a.mode==='APD'&&!apdIcoWindow(hours))long='glucose';
+    const icoVolume=Math.min(fill,ICO_MAX);
+    const rx={mode:a.mode,fill,calcium:d.calcium,hours,cycles:incremental?3:a.fast?5:a.slow?3:4,lastVolume:incremental&&long!=='ico'?0:long==='ico'?icoVolume:fill,lastKind:incremental&&long!=='ico'?'dry':long,lastConcentration:concentration,nightConcentration:concentration,prime:null,rows:[]};
     if(a.mode==='CAPD'){
       const n=incremental?3:a.fast?5:4;
       const useIco=long==='ico';
-      for(let i=0;i<n;i++)rx.rows.push({volume:fill,dwell:useIco?(i===n-1?8:16/(n-1)):incremental?6:24/n,kind:i===n-1&&useIco?'ico':'glucose',concentration,lowCa:d.calcium==='low'});
+      for(let i=0;i<n;i++){const ico=useIco&&i===n-1;rx.rows.push({volume:ico?icoVolume:fill,dwell:useIco?(ico?8:16/(n-1)):incremental?6:24/n,kind:ico?'ico':'glucose',concentration:ico?7.5:concentration,lowCa:!ico&&d.calcium==='low'});}
     } else if(long==='dry'){rx.lastVolume=0;rx.lastKind='dry';}
     return rx;
   }
@@ -164,7 +169,7 @@ const PD = (() => {
     }else{
       let hours=curHours??Math.min(sleep||8,8);
       if(sleep!==null&&hours>sleep){changes.push(`APD 時數 ${hours}→${sleep} 小時：不超過病人可用夜間時間。`);hours=sleep;}
-      rx={mode,fill,calcium:d.calcium,hours,cycles:Math.min(Math.max(n,1),12),nightConcentration:conc,lastKind:last,lastVolume:last==='dry'?0:fill,lastConcentration:conc,prime:null,rows:[]};
+      rx={mode,fill,calcium:d.calcium,hours,cycles:Math.min(Math.max(n,1),12),nightConcentration:conc,lastKind:last,lastVolume:last==='dry'?0:last==='ico'?Math.min(fill,ICO_MAX):fill,lastConcentration:conc,prime:null,rows:[]};
     }
     const g=goals(d,a,{mode,rows:rx.rows,cycles:rx.cycles,hours:rx.hours},0);
     const ufShort=g.confirmed&&g.actual!==null&&g.actual<g.ufGoal;
@@ -177,10 +182,11 @@ const PD = (() => {
       else changes.push('疑似容量不足：不增加超濾，先重新評估目標體重、攝取與用藥。');
     }else if(ufProblem||(a.fast&&!usesIco&&(mode==='CAPD'||rx.lastKind==='glucose'))){
       const why=ufShort?`淨 UF 低於目標 ${Math.round(g.ufGoal-g.actual)} mL/day`:ufProblem?'容量過多':'較快運輸且長留置為葡萄糖液';
-      const canIco=!usesIco&&(mode==='CAPD'?rx.rows.length>1:true);
+      const canIco=!usesIco&&(mode==='CAPD'?rx.rows.length>1:apdIcoWindow(rx.hours));
+      if(mode==='APD'&&!usesIco&&!apdIcoWindow(rx.hours))changes.push(`APD ${rx.hours} 小時，日間留置 ${24-rx.hours} 小時不在本版 icodextrin 14–16 小時範圍，未自動帶入 icodextrin。`);
       if(canIco&&d.icoSafe){
         if(mode==='CAPD'){setCapdIco(rx);changes.push(`${why}：夜間長留置改為 icodextrin 7.5%（每日一次）。`);}
-        else {const from=rx.lastKind==='dry'?'日間乾腹':'日間葡萄糖液';rx.lastKind='ico';rx.lastVolume=fill;changes.push(`${why}：${from}改為 icodextrin 7.5% 日間長留置。`);}
+        else {const from=rx.lastKind==='dry'?'日間乾腹':'日間葡萄糖液';rx.lastKind='ico';rx.lastVolume=Math.min(fill,ICO_MAX);changes.push(`${why}：${from}改為 icodextrin 7.5% 日間長留置。`);}
       }else if(canIco){changes.push(`${why}：建議評估 icodextrin 長留置；尚未勾選適用性確認，草案未自動帶入。`);}
       else if(conc<2.5&&has(2.5,fill)){
         if(mode==='CAPD'){const r=rx.rows.find(x=>x.kind==='glucose');r.concentration=2.5;changes.push(`${why}：第 1 次交換 ${conc}%→2.5%，其餘維持；追蹤葡萄糖暴露。`);}
@@ -200,8 +206,8 @@ const PD = (() => {
     return {rx,changes,switched:false};
   }
   function setConc(rx,c){if(rx.mode==='CAPD')rx.rows.forEach(r=>{if(r.kind==='glucose')r.concentration=c;});else{rx.nightConcentration=c;if(rx.lastKind==='glucose')rx.lastConcentration=c;}}
-  function setFill(rx,v){rx.fill=v;if(rx.mode==='CAPD')rx.rows.forEach(r=>r.volume=v);else if(rx.lastKind!=='dry')rx.lastVolume=v;}
-  function setCapdIco(rx){const n=rx.rows.length;rx.rows.forEach((r,i)=>{if(i===n-1){r.kind='ico';r.concentration=7.5;r.dwell=8;delete r.productCode;}else{if(r.kind==='ico'){r.kind='glucose';r.concentration=1.5;}r.dwell=16/(n-1);}});}
+  function setFill(rx,v){rx.fill=v;const cap=kind=>kind==='glucose'?v:Math.min(v,ICO_MAX);if(rx.mode==='CAPD')rx.rows.forEach(r=>r.volume=cap(r.kind));else if(rx.lastKind!=='dry')rx.lastVolume=cap(rx.lastKind);}
+  function setCapdIco(rx){const n=rx.rows.length;rx.rows.forEach((r,i)=>{if(i===n-1){r.kind='ico';r.concentration=7.5;r.dwell=8;r.lowCa=false;r.volume=Math.min(r.volume,ICO_MAX);delete r.productCode;}else{if(r.kind==='ico'){r.kind='glucose';r.concentration=1.5;}r.dwell=16/(n-1);}});}
   // 處方摘要：供紀錄與比較，不含醫令碼。
   function rxSummary(rx){
     if(!rx)return null;
@@ -250,13 +256,14 @@ const PD = (() => {
   }
   function validateRx(rx,d,a,catalog){
     const errors=[],warnings=[],bags=new Map(); let total=0,glucose=0,aa=0,dwell=0,icoCount=0;
-    function add(product,count,used){if(!product){errors.push('處方中有院內沒有的配方／容量組合。');return;}const prev=bags.get(product.code)||{product,count:0,used:0};prev.count+=count;prev.used+=used;bags.set(product.code,prev);}
+    const kindName={glucose:'葡萄糖液',ico:'Icodextrin',aa:'Nutrineal'};
+    function add(product,count,used,label){if(!product){errors.push((label?label+'：':'')+'院內沒有此配方／容量組合，請調整用液或灌注量（icodextrin／Nutrineal 院內僅 2 L 袋）。');return;}const prev=bags.get(product.code)||{product,count:0,used:0};prev.count+=count;prev.used+=used;bags.set(product.code,prev);}
     const limit=Number(d.fill);
     function volume(v){if(!Number.isFinite(v)||v<500||v>limit)errors.push('每次灌注量須為 500 mL 以上，且不得超過醫師確認可耐受量。');}
     function solution(kind,vol,conc){if(kind==='glucose')glucose+=vol*conc/100;if(kind==='aa')aa+=vol*0.011;}
     if(rx.mode==='CAPD'){
       if(rx.rows.length<1||rx.rows.length>6)errors.push('CAPD 交換次數超出本版範圍。');
-      for(const row of rx.rows){volume(row.volume);if(!Number.isFinite(row.dwell)||row.dwell<=0)errors.push('留置時間須大於 0。');dwell+=row.dwell;total+=row.volume;solution(row.kind,row.volume,row.concentration);const product=chooseProduct(catalog,'CAPD',row);add(product,1,row.volume);if(row.kind==='ico'){icoCount++;if(row.dwell<6||row.dwell>12)errors.push('CAPD icodextrin 長留置請設定 6–12 小時。');}if(row.kind==='aa'&&(Number(d.bicarb)<22||Number(d.potassium)<3||symptoms(d).related||num(d.bun)===null||Number(d.bun)>106.4))errors.push('Nutrineal 須核對 BUN、代謝性酸中毒、尿毒症症狀及低血鉀；目前資料不適合產生此草案。');if(row.kind==='aa')warnings.push('Nutrineal：2 L 內含 22 g 胺基酸，非等同全數吸收。確認營養需求、餐食熱量、肝功能、過敏及胺基酸代謝禁忌；本版不自動加入。');}
+      rx.rows.forEach((row,i)=>{volume(row.volume);if(!Number.isFinite(row.dwell)||row.dwell<=0)errors.push('留置時間須大於 0。');dwell+=row.dwell;total+=row.volume;solution(row.kind,row.volume,row.concentration);const product=chooseProduct(catalog,'CAPD',row);add(product,1,row.volume,`第 ${i+1} 次交換（${kindName[row.kind]||row.kind} ${row.volume} mL）`);if(row.kind==='ico'){icoCount++;if(row.dwell<6||row.dwell>12)errors.push('CAPD icodextrin 長留置請設定 6–12 小時。');}if(row.kind==='aa'&&(Number(d.bicarb)<22||Number(d.potassium)<3||symptoms(d).related||num(d.bun)===null||Number(d.bun)>106.4))errors.push('Nutrineal 須核對 BUN、代謝性酸中毒、尿毒症症狀及低血鉀；目前資料不適合產生此草案。');if(row.kind==='aa')warnings.push('Nutrineal：2 L 內含 22 g 胺基酸，非等同全數吸收。確認營養需求、餐食熱量、肝功能、過敏及胺基酸代謝禁忌；本版不自動加入。');});
       if(dwell>24.01)errors.push('CAPD 各次留置時間合計超過 24 小時。');
       if(dwell<23.99&&d.dose!=='incremental')errors.push('常規 CAPD 留置合計須為 24 小時；有計畫乾腹時請採增量式並完成確認。');
       if(rx.rows.filter(x=>x.kind==='aa').length>1)errors.push('本版 Nutrineal 僅允許每日一次，額外使用需人工評估。');
@@ -276,7 +283,7 @@ const PD = (() => {
       if(products.length){const needed=planned+(Number.isFinite(rx.prime)?rx.prime:0);let best=null;const small=products.find(x=>x.bag===2500),big=products.find(x=>x.bag===5000);for(let b=0;b<=Math.ceil(needed/5000)+1;b++)for(let s=0;s<=(small?Math.ceil(needed/2500)+1:0);s++){const supply=(big?b*5000:0)+(small?s*2500:0);if(supply>=needed&&(!best||supply<best.supply||(supply===best.supply&&b+s<best.b+best.s)))best={b,s,supply};}if(best){if(best.b)add(big,best.b,Math.min(planned,best.b*5000));if(best.s)add(small,best.s,Math.max(0,planned-best.b*5000));}else errors.push('無可用 APD 夜間袋裝組合。');}else errors.push('院內沒有選定 APD 夜間濃度／鈣配方。');
       if(rx.lastKind!=='dry'){
         volume(rx.lastVolume);total+=rx.lastVolume;solution(rx.lastKind,rx.lastVolume,rx.lastConcentration);
-        if(!sharedLast){const product=chooseProduct(catalog,'APD',{kind:rx.lastKind,volume:rx.lastVolume,concentration:rx.lastConcentration,lowCa:d.calcium==='low'});add(product,1,rx.lastVolume);}
+        if(!sharedLast){const product=chooseProduct(catalog,'APD',{kind:rx.lastKind,volume:rx.lastVolume,concentration:rx.lastConcentration,lowCa:d.calcium==='low'});add(product,1,rx.lastVolume,`最後灌注（${kindName[rx.lastKind]||rx.lastKind} ${rx.lastVolume} mL）`);}
         else warnings.push('最後灌注與夜間液相同：袋數按合併供應量估算，實機須確認最後灌注可使用該來源。');
         if(rx.lastKind==='ico'){icoCount++;if(24-rx.hours<14||24-rx.hours>16)errors.push('本版 APD icodextrin 日間長留置以 14–16 小時安排；超出時需另設日間交換／人工處方。');}
         if(rx.lastKind==='glucose'&&a.fast)warnings.push('較快運輸者日間長留置葡萄糖液可能造成再吸收，需評估 icodextrin 或日間交換。');
@@ -289,6 +296,6 @@ const PD = (() => {
     if(d.volume==='depleted'&&((rx.mode==='APD'&&rx.nightConcentration>1.5)||rx.rows.some(x=>x.kind==='glucose'&&x.concentration>1.5)))warnings.push('容量不足狀態仍使用較高葡萄糖濃度，需重新評估。');
     return {errors:[...new Set(errors)],warnings:[...new Set(warnings)],bags:[...bags.values()],total,glucose,aa,dwell,icoCount};
   }
-  return {num,goals,symptoms,symptomLabels,renal,pet,assess,initialRx,adjustRx,rxSummary,currentSummary,validateRx,chooseProduct,types,requiredFields,clearance};
+  return {num,goals,symptoms,symptomLabels,renal,pet,assess,initialRx,adjustRx,rxSummary,currentSummary,validateRx,chooseProduct,types,requiredFields,clearance,ICO_MAX};
 })();
 if(typeof module!=='undefined')module.exports=PD;
