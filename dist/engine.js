@@ -174,7 +174,8 @@ const PD = (() => {
     const g=goals(d,a,{mode,rows:rx.rows,cycles:rx.cycles,hours:rx.hours},0);
     const ufShort=g.confirmed&&g.actual!==null&&g.actual<g.ufGoal;
     const ufProblem=d.volume==='overload'||ufShort;
-    const clearProblem=(g.ktvReliable&&g.measured<g.target)||symptoms(d).related||num(d.potassium)>5.5||num(d.bicarb)<22;
+    // ISPD 2020 3.4d：低 Kt/V 本身不觸發自動加量，需另有症狀或生化證據。
+    const ktvLow=g.ktvReliable&&g.measured<g.target,clearProblem=symptoms(d).related||num(d.potassium)>5.5||num(d.bicarb)<22;
     const usesIco=mode==='CAPD'?rx.rows.some(r=>r.kind==='ico'):rx.lastKind==='ico';
     if(d.adherence==='missed'){changes.push('有漏做／中斷：先改善實際執行與完成量，本草案不自動加量。');return {rx,changes,switched:false};}
     if(d.volume==='depleted'){
@@ -194,7 +195,7 @@ const PD = (() => {
       }else changes.push(`${why}：已使用 icodextrin／較高濃度，先核對鹽水攝取、殘餘腎功能、導管引流與膜功能，不再自動提高濃度。`);
     }
     if(clearProblem&&d.volume!=='depleted'){
-      const why=g.ktvReliable&&g.measured<g.target?`實測總 Kt/V ${g.measured.toFixed(2)} 低於 ${g.target}`:'症狀／生化顯示清除可能不足';
+      const why=ktvLow?`實測總 Kt/V ${g.measured.toFixed(2)} 低於 ${g.target}，且症狀／生化顯示清除可能不足`:'症狀／生化顯示清除可能不足';
       if(fill<tol){const old=fill;setFill(rx,tol);changes.push(`${why}：灌注量 ${old}→${tol} mL（醫師確認可耐受量）。`);}
       else if(mode==='CAPD'&&rx.rows.length<5){const ico=rx.rows.some(r=>r.kind==='ico');rx.rows.push({volume:fill,dwell:0,kind:'glucose',concentration:conc,lowCa});if(ico)setCapdIco(rx);else rx.rows.forEach(r=>r.dwell=24/rx.rows.length);changes.push(`${why}：CAPD 交換 ${rx.rows.length-1}→${rx.rows.length} 次／日。`);}
       else if(mode==='APD'&&rx.lastKind==='dry'){rx.lastKind='glucose';rx.lastVolume=fill;rx.lastConcentration=rx.nightConcentration;changes.push(`${why}：日間乾腹改為葡萄糖液日間留置（wet day）。`);}
@@ -202,6 +203,7 @@ const PD = (() => {
       else if(mode==='APD'&&rx.cycles<8&&!a.slow){rx.cycles+=1;changes.push(`${why}：夜間循環 ${rx.cycles-1}→${rx.cycles} 次；核對每循環留置時間。`);}
       else changes.push(`${why}：現行可耐受劑量已達本版上限，需人工評估加日間交換、改變方式或其他治療。`);
     }
+    if(ktvLow&&!clearProblem&&d.volume!=='depleted')changes.push(`實測總 Kt/V ${g.measured.toFixed(2)} 低於 ${g.target}，但無相關症狀或 K／HCO₃⁻ 異常：不自動加量。若容量與營養也穩定，不必只為清除目標改處方；由醫師判斷。`);
     if(!changes.length)changes.push('目前資料未顯示需調整：維持現行處方，持續追蹤容量、症狀與實測清除。');
     return {rx,changes,switched:false};
   }
@@ -237,7 +239,7 @@ const PD = (() => {
     if(manual!==null&&calculated!==null&&Math.abs(manual-Math.max(0,calculated))>100)notes.push('醫師指定目標與收支估計不同，請於醫師補充記錄理由。');
     if(actual!==null&&confirmed&&actual<ufGoal)notes.push('淨 UF 低於本次目標 '+Math.round(ufGoal-actual)+' mL/day：核對實際完成量、攝取與鹽分、引流／漏液；依 PET 與實測反應調整留置、用液或日間交換。');
     if(actual!==null&&confirmed&&actual>=ufGoal&&d.volume!=='euvolemic')notes.push('UF 數值達目標，但容量尚未穩定，不能判為整體達標。');
-    if(ktvReliable&&measured<target)notes.push('實測總 Kt/V 低於檢核參考：先核對完整收集與執行，再評估增加可耐受總交換量、有效留置或日間交換；不按 Kt/V 比例直接放大劑量。');
+    if(ktvReliable&&measured<target)notes.push('實測總 Kt/V 低於檢核參考：先核對完整收集與執行。症狀、容量與營養都穩定時，不必只為清除目標改處方；有其他證據時再評估增加可耐受總交換量、有效留置或日間交換，不按 Kt/V 比例直接放大劑量。');
     if(symptoms(d).related)notes.push('仍有可能與尿毒症相關的症狀：即使 Kt/V 達參考值仍需評估，症狀改善才是臨床追蹤目標之一。');
     return {total,calculated,ufGoal,confirmed,actual,target,measured,ktvReliable,errors,missing,notes,checks:[
       {name:'每日透析液處方量',status:(total/1000).toFixed(1)+' L/day',detail:rx.mode==='CAPD'?rx.rows.length+' 次交換／日':rx.cycles+' 循環／夜，'+rx.hours+' 小時；含最後灌注'},
