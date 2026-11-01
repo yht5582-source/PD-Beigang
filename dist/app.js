@@ -143,7 +143,7 @@ $('record').addEventListener('click',()=>{
 });
 function inputValues(){const v={};document.querySelectorAll('.inputs input,.inputs select').forEach(el=>{if(el.id&&el.type!=='file')v[el.id]=el.type==='checkbox'?el.checked:el.value;});return v;}
 $('saveFile').addEventListener('click',()=>{
-  const file={schema:'pd-workstation-record/1',app:'v1.4',savedAt:new Date().toISOString(),demo:isDemo,stage,inputs:inputValues(),history};
+  const file={schema:'pd-workstation-record/1',app:'v1.5',savedAt:new Date().toISOString(),demo:isDemo,stage,inputs:inputValues(),history};
   const url=URL.createObjectURL(new Blob([JSON.stringify(file,null,1)],{type:'application/json'}));const link=document.createElement('a');
   const code=($('patient').value||'record').replace(/[^\w\-]+/g,'_').slice(0,40);link.href=url;link.download=`PD-${code}-${nowLocal().slice(0,10)}.json`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   unsaved=false;renderHistory();fileMsg(`已下載紀錄檔（${history.length} 筆處置紀錄）。檔案含臨床資料，請依院內規範保存。`);
@@ -172,4 +172,6 @@ $('loadFile').addEventListener('change',async e=>{
   progress();
 });
 window.addEventListener('beforeunload',e=>{if(unsaved){e.preventDefault();e.returnValue='';}});
+// 教學分頁「帶入工作站」：載入虛構病例並評估
+window.PDApp={loadCase(c){clear();isDemo=true;for(const [key,value]of Object.entries(c.input)){const el=$(key);if(!el)continue;if(el.type==='checkbox')el.checked=!!value;else el.value=value;}for(const code of c.symptoms||[]){const el=document.querySelector(`[data-symptom="${code}"]`);if(el)el.checked=true;}$('symptomSeverity').value=c.severity||'';$('symptomAttribution').value=c.attribution||'';symptomControls();timing();setStage(c.stage);evaluate();if(rx&&rx.mode==='APD'&&c.machine){Object.assign(rx,c.machine);renderRx();refreshRx();}progress();}};
 renderHistory();progress();
